@@ -1,0 +1,362 @@
+[
+  {
+    "id": "tab_rtls_demo",
+    "type": "tab",
+    "label": "Ubudu RTLS — Tag → Zone",
+    "disabled": false,
+    "info": "Demo flow: polls the Ubudu RTLS API for the last known positions of all\nassets, derives which tag is in which zone, and exposes the result via a\nlive dashboard, the debug sidebar, an HTTP endpoint (GET /tags) and an\noptional MQTT publish.\n\nConfiguration is read from environment variables:\n  RTLS_BASE_URL      (default https://rtls.ubudu.com/api)\n  RTLS_NAMESPACE     your app namespace UUID  (required)\n  RTLS_API_KEY       your RTLS API key        (required)\n  POLL_INTERVAL_SEC  poll interval in seconds (default 5)\n  MQTT_ENABLE        \"true\" to publish to MQTT (default false)\n  MQTT_TOPIC         base topic               (default ubudu/rtls/zones)\n"
+  },
+
+  {
+    "id": "inject_poll",
+    "type": "inject",
+    "z": "tab_rtls_demo",
+    "name": "Poll timer",
+    "props": [
+      { "p": "payload" }
+    ],
+    "repeat": "${POLL_INTERVAL_SEC}",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "2",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 110,
+    "y": 120,
+    "wires": [["fn_build_request"]]
+  },
+
+  {
+    "id": "fn_build_request",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Build RTLS request",
+    "func": "// Read config from environment variables (set in docker-compose / .env)\nconst baseUrl = (env.get('RTLS_BASE_URL') || 'https://rtls.ubudu.com/api').replace(/\\/+$/, '');\nconst namespace = env.get('RTLS_NAMESPACE');\nconst apiKey = env.get('RTLS_API_KEY');\n\nif (!namespace || !apiKey) {\n    node.error('RTLS_NAMESPACE and RTLS_API_KEY must be set as environment variables', msg);\n    node.status({ fill: 'red', shape: 'ring', text: 'missing RTLS_NAMESPACE / RTLS_API_KEY' });\n    return null;\n}\n\nnode.status({ fill: 'blue', shape: 'dot', text: 'polling…' });\n\n// GET {baseUrl}/cache/{namespace}/positions  with X-API-Key header\nmsg.method = 'GET';\nmsg.url = `${baseUrl}/cache/${encodeURIComponent(namespace)}/positions`;\nmsg.headers = {\n    'X-API-Key': apiKey,\n    'Accept': 'application/json'\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 330,
+    "y": 120,
+    "wires": [["http_get_positions"]]
+  },
+
+  {
+    "id": "http_get_positions",
+    "type": "http request",
+    "z": "tab_rtls_demo",
+    "name": "GET /cache/{ns}/positions",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 590,
+    "y": 120,
+    "wires": [["fn_map_zones"]]
+  },
+
+  {
+    "id": "fn_map_zones",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Map tag → zone",
+    "func": "// The cache endpoint returns an array of CachedAssetPosition objects.\n// Each entry carries the tag id (user_udid / MAC), a display name and an\n// embedded `zone` object ({ id, name, color }). A tag is considered outside\n// any zone when the zone is missing, has no name, or the live API reports the\n// sentinel zone name 'OUTSIDE_ALL_ZONES' — all of which we normalize to one\n// consistent label.\n\nconst OUTSIDE_LABEL = '— outside any zone —';\nconst OUTSIDE_SENTINELS = ['OUTSIDE_ALL_ZONES', 'OUTSIDE_ALL_ZONE'];\n\nconst statusCode = msg.statusCode || 200;\nif (statusCode < 200 || statusCode >= 300) {\n    node.error('RTLS API returned HTTP ' + statusCode, msg);\n    node.status({ fill: 'red', shape: 'ring', text: 'HTTP ' + statusCode });\n    return null;\n}\n\nlet positions = msg.payload;\nif (!Array.isArray(positions)) {\n    // Some deployments wrap the array; try common shapes, else treat as empty.\n    positions = (positions && (positions.data || positions.positions)) || [];\n}\n\nconst nowMs = Date.now();\nconst rows = positions.map((p) => {\n    const zone = p.zone || null;\n    const rawName = zone && zone.name ? String(zone.name) : null;\n    const isOutside = !rawName || OUTSIDE_SENTINELS.includes(rawName.toUpperCase());\n    const tsMs = p.timestamp ? Date.parse(p.timestamp) : null;\n    return {\n        tag: p.user_udid || p.external_id || '(unknown)',\n        name: p.user_name || p.external_id || p.user_udid || '(unnamed)',\n        zone: isOutside ? OUTSIDE_LABEL : rawName,\n        inZone: !isOutside,\n        zoneId: !isOutside && zone ? zone.id : null,\n        zoneColor: !isOutside && zone && zone.color ? zone.color : '#9e9e9e',\n        lat: typeof p.lat === 'number' ? Number(p.lat.toFixed(6)) : null,\n        lon: typeof p.lon === 'number' ? Number(p.lon.toFixed(6)) : null,\n        mapUuid: p.map_uuid || null,\n        lastSeen: p.timestamp || null,\n        ageSeconds: tsMs ? Math.round((nowMs - tsMs) / 1000) : null\n    };\n});\n\n// Sort by zone then name for a stable, readable table.\nrows.sort((a, b) => (a.zone || '').localeCompare(b.zone || '') || (a.name || '').localeCompare(b.name || ''));\n\n// Group by zone for the debug summary and MQTT payloads.\nconst byZone = {};\nfor (const r of rows) {\n    (byZone[r.zone] = byZone[r.zone] || []).push(r.name);\n}\n\n// Per-zone counts (descending) for the dashboard summary card. The\n// 'outside any zone' bucket is always sorted last regardless of size.\nconst zoneSummary = Object.keys(byZone).map((z) => ({ zone: z, count: byZone[z].length }));\nzoneSummary.sort((a, b) => {\n    const ao = a.zone === OUTSIDE_LABEL ? 1 : 0;\n    const bo = b.zone === OUTSIDE_LABEL ? 1 : 0;\n    return (ao - bo) || (b.count - a.count) || a.zone.localeCompare(b.zone);\n});\n\nnode.status({ fill: 'green', shape: 'dot', text: rows.length + ' tags / ' + zoneSummary.length + ' zones @ ' + new Date(nowMs).toLocaleTimeString() });\n\n// Keep the latest snapshot available for the /tags HTTP endpoint.\nconst snapshot = { updatedAt: new Date(nowMs).toISOString(), count: rows.length, zoneCount: zoneSummary.length, tags: rows, byZone: byZone, zoneSummary: zoneSummary };\nflow.set('latestSnapshot', snapshot);\n\nmsg.payload = rows;\nmsg.snapshot = snapshot;\nmsg.byZone = byZone;\nmsg.zoneSummary = zoneSummary;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 820,
+    "y": 120,
+    "wires": [["fn_filter_table", "fn_zone_summary", "fn_debug_summary", "fn_mqtt_fanout"]]
+  },
+
+  {
+    "id": "fn_debug_summary",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Format \"tag is in zone\"",
+    "func": "// Emit a clean, human-readable summary to the debug sidebar + container logs.\nconst rows = msg.payload || [];\nconst lines = rows.map((r) => `tag ${r.name} (${r.tag}) is in: ${r.zone}`);\nconst text = lines.length ? lines.join('\\n') : 'no tags reported';\nnode.warn(text); // node.warn shows in debug sidebar AND container stdout\nmsg.payload = text;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 820,
+    "y": 220,
+    "wires": [["debug_out"]]
+  },
+
+  {
+    "id": "debug_out",
+    "type": "debug",
+    "z": "tab_rtls_demo",
+    "name": "tag → zone log",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1070,
+    "y": 220,
+    "wires": []
+  },
+
+  {
+    "id": "ui_table",
+    "type": "ui_table",
+    "z": "tab_rtls_demo",
+    "group": "ui_group_tags",
+    "name": "Tag → Zone table",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "columns": [
+      { "field": "name", "title": "Tag name", "width": "", "align": "left", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "tag", "title": "Tag id (MAC)", "width": "", "align": "left", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "zone", "title": "Zone", "width": "", "align": "left", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "lat", "title": "Lat", "width": "", "align": "right", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "lon", "title": "Lon", "width": "", "align": "right", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "ageSeconds", "title": "Age (s)", "width": "", "align": "right", "formatter": "plaintext", "formatterParams": { "target": "_blank" } }
+    ],
+    "outputs": 0,
+    "cts": false,
+    "x": 1070,
+    "y": 160,
+    "wires": []
+  },
+
+  {
+    "id": "ui_search",
+    "type": "ui_text_input",
+    "z": "tab_rtls_demo",
+    "name": "Filter box",
+    "label": "Filter (name / tag / zone)",
+    "tooltip": "Type to filter the table. Clear to show all tags.",
+    "group": "ui_group_tags",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "passthru": true,
+    "mode": "text",
+    "delay": "300",
+    "topic": "filter",
+    "sendOnBlur": true,
+    "className": "",
+    "topicType": "str",
+    "x": 820,
+    "y": 60,
+    "wires": [["fn_filter_table"]]
+  },
+
+  {
+    "id": "fn_filter_table",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Apply filter → table",
+    "func": "// Fed by two sources:\n//   - the poll (msg.payload = array of tag rows) -> cache the rows\n//   - the filter box (msg.topic = 'filter', msg.payload = search term)\n// Either trigger re-renders the table with the current rows + current term.\n\nif (msg.topic === 'filter') {\n    flow.set('filterTerm', (msg.payload || '').toString().trim().toLowerCase());\n} else if (Array.isArray(msg.payload)) {\n    flow.set('tableRows', msg.payload);\n}\n\nconst rows = flow.get('tableRows') || [];\nconst term = flow.get('filterTerm') || '';\n\nlet shown = rows;\nif (term) {\n    shown = rows.filter((r) =>\n        (r.name && r.name.toLowerCase().includes(term)) ||\n        (r.tag && r.tag.toLowerCase().includes(term)) ||\n        (r.zone && r.zone.toLowerCase().includes(term))\n    );\n}\n\nnode.status({ fill: 'grey', shape: 'dot', text: shown.length + ' / ' + rows.length + (term ? \" matching '\" + term + \"'\" : ' shown') });\nmsg.payload = shown;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1060,
+    "y": 100,
+    "wires": [["ui_table"]]
+  },
+
+  {
+    "id": "fn_zone_summary",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Zone summary → card",
+    "func": "// Render the per-zone counts produced by 'Map tag → zone'.\nmsg.payload = (msg.zoneSummary || []).map((z) => ({ zone: z.zone, tags: z.count }));\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 820,
+    "y": 160,
+    "wires": [["ui_zone_summary"]]
+  },
+
+  {
+    "id": "ui_zone_summary",
+    "type": "ui_table",
+    "z": "tab_rtls_demo",
+    "group": "ui_group_summary",
+    "name": "Tags per zone",
+    "order": 1,
+    "width": 0,
+    "height": 0,
+    "columns": [
+      { "field": "zone", "title": "Zone", "width": "", "align": "left", "formatter": "plaintext", "formatterParams": { "target": "_blank" } },
+      { "field": "tags", "title": "Tags", "width": "80", "align": "right", "formatter": "plaintext", "formatterParams": { "target": "_blank" } }
+    ],
+    "outputs": 0,
+    "cts": false,
+    "x": 1060,
+    "y": 160,
+    "wires": []
+  },
+
+  {
+    "id": "fn_mqtt_fanout",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "MQTT fan-out (optional)",
+    "func": "// Only emit MQTT messages when MQTT_ENABLE=true. Publishes:\n//   {base}/snapshot          -> full snapshot (retained)\n//   {base}/tag/{tagId}       -> per-tag zone state (retained)\nif ((env.get('MQTT_ENABLE') || 'false').toLowerCase() !== 'true') {\n    return null;\n}\n\nconst base = (env.get('MQTT_TOPIC') || 'ubudu/rtls/zones').replace(/\\/+$/, '');\nconst rows = msg.payload || [];\nconst out = [];\n\nout.push({\n    topic: base + '/snapshot',\n    retain: true,\n    payload: msg.snapshot\n});\n\nfor (const r of rows) {\n    out.push({\n        topic: base + '/tag/' + r.tag,\n        retain: true,\n        payload: r\n    });\n}\n\nreturn [out];",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 830,
+    "y": 320,
+    "wires": [["mqtt_out"]]
+  },
+
+  {
+    "id": "mqtt_out",
+    "type": "mqtt out",
+    "z": "tab_rtls_demo",
+    "name": "Publish zone events",
+    "topic": "",
+    "qos": "0",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "mqtt_broker_cfg",
+    "x": 1080,
+    "y": 320,
+    "wires": []
+  },
+
+  {
+    "id": "http_in_tags",
+    "type": "http in",
+    "z": "tab_rtls_demo",
+    "name": "GET /tags",
+    "url": "/tags",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 110,
+    "y": 440,
+    "wires": [["fn_serve_tags"]]
+  },
+
+  {
+    "id": "fn_serve_tags",
+    "type": "function",
+    "z": "tab_rtls_demo",
+    "name": "Serve latest snapshot",
+    "func": "const snapshot = flow.get('latestSnapshot');\nif (!snapshot) {\n    msg.statusCode = 503;\n    msg.payload = { error: 'No data yet — the first poll has not completed.' };\n    return msg;\n}\nmsg.statusCode = 200;\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.payload = snapshot;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 340,
+    "y": 440,
+    "wires": [["http_response_tags"]]
+  },
+
+  {
+    "id": "http_response_tags",
+    "type": "http response",
+    "z": "tab_rtls_demo",
+    "name": "Respond JSON",
+    "statusCode": "",
+    "headers": {},
+    "x": 580,
+    "y": 440,
+    "wires": []
+  },
+
+  {
+    "id": "comment_help",
+    "type": "comment",
+    "z": "tab_rtls_demo",
+    "name": "How this demo works (read me)",
+    "info": "Poll timer fires every POLL_INTERVAL_SEC seconds (default 5).\n\n1. Build RTLS request — reads RTLS_BASE_URL / RTLS_NAMESPACE / RTLS_API_KEY\n   from the environment and prepares GET /cache/{namespace}/positions with\n   the X-API-Key header.\n2. http request — calls the Ubudu RTLS API.\n3. Map tag → zone — turns each CachedAssetPosition into a row\n   { tag, name, zone, inZone, lat, lon, ageSeconds } using the embedded\n   `zone` object. Tags with no zone or the sentinel 'OUTSIDE_ALL_ZONES'\n   are normalized to one 'outside any zone' label. Also produces a\n   per-zone count (zoneSummary) and caches the snapshot for /tags.\n4. Outputs:\n   • Dashboard        → http://localhost:1880/ui\n       - Tags per zone : per-zone counts (summary card)\n       - Live tag→zone : filterable table (type in the Filter box)\n   • Debug log        → debug sidebar + container logs\n   • MQTT (optional)  → set MQTT_ENABLE=true\n   • HTTP JSON        → http://localhost:1880/tags  (includes zoneSummary)",
+    "x": 150,
+    "y": 60,
+    "wires": []
+  },
+
+  {
+    "id": "ui_group_summary",
+    "type": "ui_group",
+    "name": "Tags per zone",
+    "tab": "ui_tab_rtls",
+    "order": 1,
+    "disp": true,
+    "width": 18,
+    "collapse": true
+  },
+  {
+    "id": "ui_group_tags",
+    "type": "ui_group",
+    "name": "Live tag → zone",
+    "tab": "ui_tab_rtls",
+    "order": 2,
+    "disp": true,
+    "width": 18,
+    "collapse": false
+  },
+  {
+    "id": "ui_tab_rtls",
+    "type": "ui_tab",
+    "name": "Ubudu RTLS",
+    "icon": "place",
+    "order": 1,
+    "disabled": false,
+    "hidden": false
+  },
+  {
+    "id": "mqtt_broker_cfg",
+    "type": "mqtt-broker",
+    "name": "Demo MQTT broker",
+    "broker": "${MQTT_HOST}",
+    "port": "${MQTT_PORT}",
+    "clientid": "node-red-ubudu-rtls",
+    "autoConnect": false,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": ""
+  }
+]

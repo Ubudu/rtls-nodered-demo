@@ -1,0 +1,23 @@
+# ---- Secrets / local config — NEVER commit -------------------------------
+# Ignore every .env variant, but keep the template.
+.env
+.env.*
+!.env.example
+
+# ---- Node-RED runtime state ----------------------------------------------
+# Created at runtime / when a /data volume is mounted. Never source.
+.node-red/
+flows_cred.json
+*_cred.json
+.config.*.json
+.flows.json.backup
+.sessions.json
+node_modules/
+*.log
+
+# ---- Tooling / editor / OS ------------------------------------------------
+.claude/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

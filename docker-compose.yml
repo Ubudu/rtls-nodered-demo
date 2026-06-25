@@ -1,0 +1,48 @@
+# Ubudu RTLS integration demo — Node-RED that polls the RTLS API for the
+# last known tag positions and shows which tag is in which zone.
+#
+#   1. cp .env.example .env   and fill in RTLS_NAMESPACE + RTLS_API_KEY
+#   2. docker compose up --build
+#   3. open http://localhost:1880/ui   (live dashboard)
+#                http://localhost:1880/tags  (latest tag→zone as JSON)
+#                http://localhost:1880/      (Node-RED editor / flow)
+
+services:
+  node-red:
+    build: .
+    image: ubudu-rtls-nodered-demo
+    container_name: ubudu-rtls-nodered-demo
+    restart: unless-stopped
+    ports:
+      - "1880:1880"
+    environment:
+      # ---- RTLS connection (required) ----
+      RTLS_BASE_URL: ${RTLS_BASE_URL:-https://rtls.ubudu.com/api}
+      RTLS_NAMESPACE: ${RTLS_NAMESPACE:?set RTLS_NAMESPACE in your .env}
+      RTLS_API_KEY: ${RTLS_API_KEY:?set RTLS_API_KEY in your .env}
+      # ---- Polling ----
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-5}
+      # ---- Optional MQTT re-publish ----
+      MQTT_ENABLE: ${MQTT_ENABLE:-false}
+      MQTT_TOPIC: ${MQTT_TOPIC:-ubudu/rtls/zones}
+      MQTT_HOST: ${MQTT_HOST:-mqtt}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+    # Persist the runtime flow state / context across restarts (optional).
+    # volumes:
+    #   - node_red_data:/data
+
+  # ---- Optional local MQTT broker -------------------------------------------
+  # Enable this service (and set MQTT_ENABLE=true, MQTT_HOST=mqtt in your .env)
+  # if you want to see the per-tag zone events published over MQTT. Subscribe
+  # with e.g.  mosquitto_sub -h localhost -t 'ubudu/rtls/zones/#' -v
+  #
+  # mqtt:
+  #   image: eclipse-mosquitto:2
+  #   container_name: ubudu-rtls-mqtt
+  #   restart: unless-stopped
+  #   ports:
+  #     - "1883:1883"
+  #   command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+
+# volumes:
+#   node_red_data:
