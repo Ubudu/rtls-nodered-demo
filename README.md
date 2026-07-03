@@ -19,11 +19,11 @@ The Node-RED editor (the flow itself) is at <http://localhost:1880/>.
 
 The dashboard has two parts:
 
-- **Tags per zone** — a per-zone count card (e.g. `Urgences — 78`,
-  `Biomédical — 172`), with tags currently outside any zone always shown last.
+- **Tags per zone** — a per-zone count card (e.g. `Biomedical — 17`,
+  `Emergency — 12`), with tags currently outside any zone always shown last.
 - **Live tag → zone** — a filterable table of every tag (name, MAC, zone,
   coordinates, age). Type in the **Filter** box to narrow by name, MAC, or zone
-  (e.g. `cardio`, `urgences`, or a specific MAC); clear it to show all.
+  (e.g. `cardio`, `emergency`, or a specific MAC); clear it to show all.
 
 ---
 
@@ -36,8 +36,9 @@ GET {RTLS_BASE_URL}/cache/{RTLS_NAMESPACE}/positions
 Header: X-API-Key: <your key>
 ```
 
-Each entry returned is a *cached asset position* that includes the tag id
-(`user_udid` / MAC), a display name (`user_name`), the coordinates, and an
+Each entry returned is a *cached asset position* that includes a tag id
+(`user_udid` / MAC, `external_id`, or `user_uuid`, depending on the
+deployment), a display name (`user_name`), the coordinates, and an
 embedded **`zone`** object (`id`, `name`, `color`). The flow turns that into a
 simple `tag → zone` mapping.
 
@@ -113,44 +114,44 @@ The flow refuses to poll until `RTLS_NAMESPACE` and `RTLS_API_KEY` are set
 ```json
 {
   "updatedAt": "2026-06-24T14:12:29.264Z",
-  "count": 1102,
-  "zoneCount": 62,
+  "count": 42,
+  "zoneCount": 7,
   "tags": [
     {
-      "tag": "ee83c628f228",
-      "name": "25",
-      "zone": "Accès Urgences",
+      "tag": "aabbcc000001",
+      "name": "Bed 25",
+      "zone": "Emergency",
       "inZone": true,
-      "zoneId": 64210,
+      "zoneId": 101,
       "zoneColor": "#2e79ff",
-      "lat": 48.829783,
-      "lon": 2.310822,
-      "mapUuid": "a74f4e60fb2f01371fd916d9c5508126",
+      "lat": 48.856614,
+      "lon": 2.352222,
+      "mapUuid": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
       "lastSeen": "2026-06-24T05:18:12Z",
       "ageSeconds": 32057
     },
     {
-      "tag": "cd8daf1eeea0",
-      "name": "124",
+      "tag": "aabbcc000002",
+      "name": "Pump 124",
       "zone": "— outside any zone —",
       "inZone": false,
       "zoneId": null,
       "zoneColor": "#9e9e9e",
-      "lat": 48.8305,
-      "lon": 2.3110,
-      "mapUuid": "a74f4e60fb2f01371fd916d9c5508126",
+      "lat": 48.856200,
+      "lon": 2.352800,
+      "mapUuid": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
       "lastSeen": "2026-06-24T13:50:02Z",
       "ageSeconds": 1347
     }
   ],
   "byZone": {
-    "Accès Urgences": ["25", "..."],
-    "— outside any zone —": ["124", "..."]
+    "Emergency": ["Bed 25", "..."],
+    "— outside any zone —": ["Pump 124", "..."]
   },
   "zoneSummary": [
-    { "zone": "Biomédical", "count": 172 },
-    { "zone": "Urgences - UHCD - 8324", "count": 78 },
-    { "zone": "— outside any zone —", "count": 23 }
+    { "zone": "Biomedical", "count": 17 },
+    { "zone": "Emergency", "count": 12 },
+    { "zone": "— outside any zone —", "count": 4 }
   ]
 }
 ```
@@ -186,7 +187,7 @@ curl -s http://localhost:1880/tags \
 
 # Look up which zone a specific tag (by MAC) is in
 curl -s http://localhost:1880/tags \
-  | jq '.tags[] | select(.tag == "ee83c628f228") | .zone'
+  | jq '.tags[] | select(.tag == "aabbcc000001") | .zone'
 ```
 
 ---
@@ -211,13 +212,13 @@ Published topics (retained):
 
   ```json
   {
-    "tag": "ee83c628f228",
-    "name": "25",
-    "zone": "Accès Urgences",
+    "tag": "aabbcc000001",
+    "name": "Bed 25",
+    "zone": "Emergency",
     "inZone": true,
-    "zoneId": 64210,
-    "lat": 48.829783,
-    "lon": 2.310822,
+    "zoneId": 101,
+    "lat": 48.856614,
+    "lon": 2.352222,
     "lastSeen": "2026-06-24T05:18:12Z",
     "ageSeconds": 32057
   }
@@ -258,7 +259,7 @@ uncomment the `node_red_data` volume in `docker-compose.yml`.
 
 The `tag → zone` mapping this demo produces is the building block for most RTLS
 integrations. Below are common scenarios and how to build each one on top of
-the existing flow. The data is the same in this hospital demo namespace
+the existing flow. The data looks the same in a hospital deployment
 (beds, equipment, staff badges as "tags"; departments and rooms as "zones") or
 in a warehouse, factory, retail or office deployment.
 
@@ -271,18 +272,18 @@ Already built — see the **Tags per zone** dashboard card, or:
 
 ```bash
 curl -s http://localhost:1880/tags | jq '.zoneSummary'
-# [{ "zone": "Biomédical", "count": 172 }, { "zone": "Urgences ...", "count": 78 }, ...]
+# [{ "zone": "Biomedical", "count": 17 }, { "zone": "Emergency", "count": 12 }, ...]
 ```
 
 Drive a wallboard, capacity alarm, or BI export straight from `zoneSummary`.
 
 ### 2. Find a specific asset
 
-**Goal:** "Which room is bed `tag 25` (`ee83c628f228`) in?"
+**Goal:** "Which room is `Bed 25` (`aabbcc000001`) in?"
 
 ```bash
 curl -s http://localhost:1880/tags \
-  | jq '.tags[] | select(.tag=="ee83c628f228") | {name, zone, lastSeen}'
+  | jq '.tags[] | select(.tag=="aabbcc000001") | {name, zone, lastSeen}'
 ```
 
 In the dashboard, just type the name or MAC into the **Filter** box.
@@ -338,7 +339,7 @@ Filter the rows for the forbidden combination and raise an alert:
 
 ```javascript
 // Function node: "Check restricted zones"
-const FORBIDDEN_ZONE = 'Pharmacie Hospitalière';
+const FORBIDDEN_ZONE = 'Pharmacy';
 const breaches = msg.payload.filter(r => r.zone.includes(FORBIDDEN_ZONE));
 return breaches.length ? { payload: breaches } : null;
 ```
@@ -377,3 +378,9 @@ production integrations you may prefer:
   (`client.positions.listCached()`, `client.zones`, spatial queries, typed
   errors, and a WebSocket subscriber).
 - **Full API reference** — <https://rtls.ubudu.com/api/docs>.
+
+---
+
+## License
+
+[MIT](LICENSE)
