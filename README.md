@@ -54,6 +54,53 @@ official [`ubudu-rtls-sdk`](https://www.npmjs.com/package/ubudu-rtls-sdk) — se
 
 ---
 
+## Architecture
+
+```mermaid
+flowchart LR
+    tags["Tags on assets<br/>(UWB / BLE)"] -->|positions| rtls["Ubudu RTLS platform<br/>positioning + zone engine"]
+
+    subgraph host["Your machine — docker compose"]
+        nr["Node-RED container :1880<br/>flow: poll, map tag → zone"]
+        mq["Mosquitto MQTT broker<br/>(optional second container)"]
+    end
+
+    rtls -->|"HTTPS poll every POLL_INTERVAL_SEC<br/>GET /cache/:ns/positions + X-API-Key"| nr
+
+    nr -->|"/ui"| dash["Live dashboard"]
+    nr -->|"GET /tags"| json["JSON snapshot"]
+    nr -->|debug| logs["Debug sidebar /<br/>container logs"]
+    nr -->|"retained topics"| mq
+
+    dash --> browser["Your browser"]
+    json --> partner["Partner systems<br/>WMS / EMR / BI / alerting"]
+    mq --> partner
+```
+
+How the pieces fit:
+
+- **One container.** The stock `nodered/node-red` image plus the two dashboard
+  nodes, with `flows.json` and `settings.js` baked in at build time — the demo
+  works on first `docker compose up`, nothing to wire together.
+- **Pull, not push.** Node-RED polls the RTLS cloud over *outbound* HTTPS; no
+  inbound port, webhook, or VPN into your network is needed. (Prefer pushes?
+  The same data is available over WebSocket — see
+  [Going further](#going-further).)
+- **Secrets stay outside.** The namespace and API key enter only as environment
+  variables at runtime (`.env` / `-e`), never the image or the flow.
+- **One normalized snapshot feeds every output.** The *Map tag → zone* node
+  turns raw API rows into `{ tag, name, zone, inZone, … }` plus the `byZone` /
+  `zoneSummary` aggregates; the dashboard, `GET /tags`, the debug log, and MQTT
+  all consume that same object, so extending one output never breaks another.
+- **MQTT is additive.** Off by default; enable it to bridge into partner
+  systems. Topics are *retained*, so a consumer that connects later still gets
+  the current zone of every tag immediately.
+
+The node-by-node layout of the flow itself is shown in
+[Editing the flow](#editing-the-flow).
+
+---
+
 ## Quick start
 
 You need [Docker](https://docs.docker.com/get-docker/) (with Compose).
